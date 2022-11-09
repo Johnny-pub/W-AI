@@ -1,0 +1,144 @@
+import os
+import struct
+import threading
+import socket
+socket.socket
+
+import cv2
+import numpy as np
+import tensorflow.compat.v1 as tf
+
+tf.disable_v2_behavior()
+import network
+import guided_filter
+from tqdm import tqdm
+
+
+
+def resize_crop(image):
+    h, w, c = np.shape(image)
+    if min(h, w) > 720:
+        if h > w:
+            h, w = int(720*h/w), 720
+        else:
+            h, w = 720, int(720*w/h)
+    image = cv2.resize(image, (w, h),
+                       interpolation=cv2.INTER_AREA)
+    h, w = (h//8)*8, (w//8)*8
+    image = image[:h, :w, :]
+    return image
+    
+
+def cartoonize(load_folder, save_folder, model_path):
+    input_photo = tf.placeholder(tf.float32, [1, None, None, 3])
+    network_out = network.unet_generator(input_photo)
+    final_out = guided_filter.guided_filter(input_photo, network_out, r=1, eps=5e-3)
+
+    all_vars = tf.trainable_variables()
+    gene_vars = [var for var in all_vars if 'generator' in var.name]
+    saver = tf.train.Saver(var_list=gene_vars)
+    
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
+
+    sess.run(tf.global_variables_initializer())
+    saver.restore(sess, tf.train.latest_checkpoint(model_path))
+    name_list = os.listdir(load_folder)
+    for name in tqdm(name_list):
+        try:
+            load_path = os.path.join(load_folder, name)
+            save_path = os.path.join(save_folder, name)
+            image = cv2.imread(load_path)
+            image = resize_crop(image)
+            batch_image = image.astype(np.float32)/127.5 - 1
+            batch_image = np.expand_dims(batch_image, axis=0)
+            output = sess.run(final_out, feed_dict={input_photo: batch_image})
+            output = (np.squeeze(output)+1)*127.5
+            output = np.clip(output, 0, 255).astype(np.uint8)
+            cv2.imwrite(save_path, output)
+            print('success')
+        except:
+            print('cartoonize {} failed'.format(load_path))
+
+
+
+def main():
+    # 创建服务器套接字
+    serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # 获取本地主机名称
+    host = socket.gethostname()
+    # 设置一个端口
+    port = 9999
+    # 将套接字与本地主机和端口绑定
+    serversocket.bind((host, port))
+    # 设置监听最大连接数
+    serversocket.listen(5)
+    # 获取本地服务器的连接信息
+    myaddr = serversocket.getsockname()
+    print("服务器地址:%s" % str(myaddr))
+    # 循环等待接受客户端信息
+    while True:
+        # 获取一个客户端连接
+        clientsocket, addr = serversocket.accept()
+        print("连接地址:%s" % str(addr))
+        try:
+            t = ServerThreading(clientsocket)  # 为每一个请求开启一个处理线程
+            t.start()
+            pass
+        except Exception as identifier:
+            print(identifier)
+            pass
+        pass
+    serversocket.close()
+    pass
+
+class ServerThreading(threading.Thread):
+    # words = text2vec.load_lexicon()
+    def __init__(self, clientsocket, recvsize=1024 * 1024, encoding="utf-8"):
+        threading.Thread.__init__(self)
+        self._socket = clientsocket
+        self._recvsize = recvsize
+        self._encoding = encoding
+        pass
+
+    def run(self):
+        print("开启线程.....")
+        try:
+            # 接受Springboot传来的指令数据
+            msg = ''
+            while True:
+                # 读取recvsize个字节
+                rec = self._socket.recv(self._recvsize)
+                # 解码
+                msg += rec.decode(self._encoding)
+                # 文本接受是否完毕，因为python socket不能自己判断接收数据是否完毕，
+                # 所以需要自定义协议标志数据接受完毕
+                if msg.strip().endswith('over'):
+                    break
+            print(msg[:-4])
+            model_path = 'saved_models'
+            load_folder = 'test_images'
+            save_folder = 'cartoonized_images'
+            if not os.path.exists(save_folder):
+                os.mkdir(save_folder)
+            cartoonize(load_folder, save_folder, model_path)
+            self._socket.send("ok".encode("utf-8"))
+
+        except Exception as identifier:
+            self._socket.send("500".encode(self._encoding))
+            print(identifier)
+            pass
+        finally:
+            self._socket.close()
+        print("任务结束.....")
+
+        pass
+
+    def __del__(self):
+        pass
+
+    
+
+if __name__ == '__main__':
+    main()
